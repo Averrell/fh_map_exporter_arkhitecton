@@ -42,6 +42,7 @@ namespace Exporter
         private static readonly string[] _patternStrings =
         {
             "Engine__Content__BasicShapes__.*",
+            "Meshes__Measurement__Plane",
             "FX__Mesh__.*",
             "Meshes__SM_SkySphere",
             "Meshes__Vehicles__BargeDestroyed",
