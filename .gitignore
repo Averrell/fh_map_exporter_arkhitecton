@@ -1,0 +1,7 @@
+prompt*
+export/
+.etc/
+bin/
+obj/
+_*.py
+__*

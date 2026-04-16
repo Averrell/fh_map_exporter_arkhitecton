@@ -1,0 +1,928 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using CUE4Parse.FileProvider;
+using CUE4Parse.UE4.Assets;
+using CUE4Parse.UE4.Assets.Exports;
+using CUE4Parse.UE4.Assets.Exports.Component.StaticMesh;
+using CUE4Parse.UE4.Assets.Exports.SkeletalMesh;
+using CUE4Parse.UE4.Assets.Exports.StaticMesh;
+using CUE4Parse.UE4.Assets.Objects;
+using CUE4Parse.UE4.Objects.Core.Math;
+using CUE4Parse.UE4.Objects.UObject;
+using CUE4Parse.UE4.Objects.Engine;
+using CUE4Parse_Conversion;
+using CUE4Parse_Conversion.Meshes;
+using Newtonsoft.Json.Linq;
+using Serilog;
+using Microsoft.VisualBasic;
+using System.Buffers.Binary;
+using System.Reflection.Metadata;
+
+namespace Exporter
+{
+    internal sealed class TemplateData
+    {
+        public FPackageIndex? MeshIndex;
+        public double[] RelLoc   = [0, 0, 0];
+        public double[] RelScale = [1, 1, 1];
+        public double[] RelRot   = [0, 0, 0];
+    }
+
+    internal sealed class MapItem
+    {
+        public int         Id;
+        public UObject     Export      = null!;
+        public string      ExportType  = string.Empty;
+        public bool        IsBlueprint;
+        public string?     BlueprintPath;
+
+        public double[] RelLoc   = [0, 0, 0];
+        public double[] RelScale = [1, 1, 1];
+        public double[] RelRot   = [0, 0, 0];
+
+        public readonly List<double[]> RelInstances = [];
+
+        public string?        Mesh;
+        public FPackageIndex? MeshIndex;
+
+        public MapItem?       Parent;
+        public MapItem?       CreatedBy;
+        public List<MapItem>  Created = [];
+
+        // Global (world-space) – null until Globalize() runs
+        public double[]?   GlobLoc;
+        public double[]?   GlobScale;
+        public double[,]?  GlobRot;
+        public readonly List<double[]> GlobInstances = [];
+    }
+
+    internal sealed class MapExporter
+    {
+        private readonly DefaultFileProvider _provider;
+        private readonly string              _exportFolder;
+
+        private readonly Dictionary<UObject, MapItem> _objToItem
+            = new(ReferenceEqualityComparer.Instance);
+
+        private readonly Dictionary<string, Dictionary<string, TemplateData>> _bpTemplateCache = [];
+
+        private readonly bool _exportTextures;
+
+        public MapExporter(DefaultFileProvider provider, string exportFolder, bool exportTextures = false)
+        {
+            _provider       = provider;
+            _exportFolder   = exportFolder;
+            _exportTextures = exportTextures;
+        }
+
+        public void Export(string assetPath)
+        {
+            if (assetPath.EndsWith(".umap", StringComparison.OrdinalIgnoreCase))
+                assetPath = assetPath[..^5];
+
+            Log.Information("Loading package: {0}", assetPath);
+
+            if (!_provider.TryLoadPackage(assetPath, out var pkg))
+            {
+                Log.Error("Package not found: {0}", assetPath);
+                return;
+            }
+
+            if (pkg is not Package p)
+            {
+                Log.Error("Package is not a standard UE4 Package – aborting.");
+                return;
+            }
+
+            string mapName = assetPath.Split('/', '\\').Last();
+            Log.Information("Processing '{0}'  ({1} exports)", mapName, p.ExportMap.Length);
+
+            // 1. Build flat item list
+            var allItems = new List<MapItem>(p.ExportMap.Length);
+            _objToItem.Clear();
+
+            for (int i = 0; i < p.ExportMap.Length; i++)
+            {
+                string exportTypeName = p.ExportMap[i].ClassName;
+
+                UObject? obj = null;
+                try { obj = p.ExportsLazy[i].Value; }
+                catch (Exception ex) { Log.Verbose("Skip export {0}: {1}", i, ex.Message); }
+
+                if (obj == null)
+                {
+                    allItems.Add(new MapItem { Id = i, ExportType = exportTypeName });
+                    continue;
+                }
+
+                bool isBp  = exportTypeName.EndsWith("_C", StringComparison.Ordinal);
+                string? bpPath = isBp ? GetBlueprintPath(obj.Class) : null;
+
+                var item = new MapItem
+                {
+                    Id            = i,
+                    Export        = obj,
+                    ExportType    = exportTypeName,
+                    IsBlueprint   = isBp,
+                    BlueprintPath = bpPath,
+                };
+                allItems.Add(item);
+                _objToItem[obj] = item;
+            }
+
+            // 2. Init
+            Log.Information("Initialising items…");
+            foreach (var item in allItems)
+                if (item.Export != null) InitItem(item);
+
+            // 3. Populate blueprint defaults (transforms from SCS/CDO)
+            Log.Information("Populating blueprint defaults…");
+            foreach (var item in allItems)
+                if (item.Export != null) PopulateBlueprintDefaults(item);
+
+            // 4. Globalize
+            Log.Information("Globalizing transforms…");
+            foreach (var item in allItems)
+                if (item.Export != null) Globalize(item);
+
+            // 5. Serialize
+            Log.Information("Serializing…");
+            var symbols    = new Dictionary<string, List<double[]>>();
+            var groups     = new Dictionary<string, List<double[]>>();
+            var blueprints = new Dictionary<string, List<JObject>>();
+
+            Directory.CreateDirectory(Path.Combine(_exportFolder, "_meshes"));
+
+            foreach (var item in allItems)
+                if (item.Export != null) SerializeItem(item, symbols, groups, blueprints);
+
+            Log.Information("symbols={0}  groups={1}  blueprints={2}",
+                symbols.Count, groups.Count, blueprints.Count);
+
+            // 6. Export textures (optional)
+            if (_exportTextures)
+            {
+                Log.Information("Stitching landscape textures…");
+                LandscapeStitcher.StitchFromPackage(p, _exportFolder, mapName);
+            }
+
+            // 7. Write JSON
+            var output = new JObject
+            {
+                ["symbols"]    = ToJObject(symbols),
+                ["blueprints"] = BlueprintsToJObject(blueprints),
+                ["groups"]     = ToJObject(groups),
+            };
+
+            string jsonDir = Path.Combine(_exportFolder, "_json");
+            Directory.CreateDirectory(jsonDir);
+            string outPath = Path.Combine(jsonDir, mapName + ".json");
+            File.WriteAllText(outPath, JsonOutput.Serialize(output));
+            Log.Information("Wrote {0}", outPath);
+        }
+
+        private void InitItem(MapItem item)
+        {
+            var exp = item.Export;
+
+            var rl = exp.GetOrDefault<FVector>("RelativeLocation",  FVector.ZeroVector);
+            var rs = exp.GetOrDefault<FVector>("RelativeScale3D",   FVector.OneVector);
+            var rr = exp.GetOrDefault<FRotator>("RelativeRotation", FRotator.ZeroRotator);
+
+            item.RelLoc   = [rl.X, rl.Y, rl.Z];
+            item.RelScale = [rs.X, rs.Y, rs.Z];
+            item.RelRot   = [rr.Pitch, rr.Yaw, rr.Roll];
+
+            var ap = exp.GetOrDefault<FPackageIndex>("AttachParent");
+            var rc = exp.GetOrDefault<FPackageIndex>("RootComponent");
+            var parentIdx = (ap != null && !ap.IsNull) ? ap
+                          : (rc != null && !rc.IsNull) ? rc
+                          : null;
+            if (parentIdx != null)
+                item.Parent = ResolveToItem(parentIdx);
+
+            // HISM / foliage instances
+            if (exp is UInstancedStaticMeshComponent hism && hism.PerInstanceSMData != null)
+            {
+                foreach (var inst in hism.PerInstanceSMData)
+                {
+                    var t = inst.TransformData;
+                    item.RelInstances.Add([
+                        t.Translation.X, t.Translation.Y, t.Translation.Z,
+                        t.Scale3D.X,     t.Scale3D.Y,     t.Scale3D.Z,
+                        t.Rotation.X,    t.Rotation.Y,    t.Rotation.Z, t.Rotation.W,
+                    ]);
+                }
+            }
+
+            bool isFoliage = item.ExportType.Contains("FoliageInstancedStaticMesh",
+                                                       StringComparison.OrdinalIgnoreCase);
+            if (!isFoliage || item.RelInstances.Count > 0)
+            {
+                var mi = exp.GetOrDefault<FPackageIndex>("StaticMesh");
+                if (mi == null || mi.IsNull)
+                    mi = exp.GetOrDefault<FPackageIndex>("SkeletalMesh");
+                if (mi != null && !mi.IsNull)
+                {
+                    item.Mesh      = ResolveMeshPath(mi);
+                    item.MeshIndex = mi;
+                }
+            }
+
+            if (!item.IsBlueprint &&
+                exp.GetOrDefault<FPackageIndex[]>("BlueprintCreatedComponents") == null)
+                return;
+
+            var seenIds = new HashSet<int>();
+
+            var bcc = exp.GetOrDefault<FPackageIndex[]>("BlueprintCreatedComponents");
+            if (bcc != null)
+                foreach (var ci in bcc)
+                    ClaimComponent(item, ci, seenIds);
+
+            if (item.IsBlueprint)
+            {
+                foreach (var prop in exp.Properties)
+                {
+                    if (prop.Name.Text == "BlueprintCreatedComponents") continue;
+                    if (prop.Tag == null) continue;
+                    FPackageIndex? ci = null;
+                    try { ci = prop.Tag.GetValue(typeof(FPackageIndex)) as FPackageIndex; }
+                    catch { /* not an object ref */ }
+                    if (ci != null) ClaimComponent(item, ci, seenIds);
+                }
+            }
+        }
+
+        private void ClaimComponent(MapItem owner, FPackageIndex? ci, HashSet<int> seenIds)
+        {
+            if (ci == null || ci.IsNull) return;
+            var comp = ResolveToItem(ci);
+            if (comp == null || seenIds.Contains(comp.Id)) return;
+
+            comp.CreatedBy = owner;
+            seenIds.Add(comp.Id);
+
+            if (Constants.SkipTypes.Contains(comp.ExportType)) return;
+
+            owner.Created.Add(comp);
+        }
+
+        private void PopulateBlueprintDefaults(MapItem item)
+        {
+            if (!item.IsBlueprint || item.BlueprintPath == null) return;
+
+            if (!_bpTemplateCache.TryGetValue(item.BlueprintPath, out var cache))
+            {
+                cache = BuildTemplateCache(item.BlueprintPath);
+                _bpTemplateCache[item.BlueprintPath] = cache;
+            }
+
+            // Strip "_GEN_VARIABLE" suffix to match SCS InternalVariableName.
+            foreach (var comp in item.Created)
+            {
+                var lookupName = comp.Export.Name;
+                if (lookupName.EndsWith("_GEN_VARIABLE", StringComparison.Ordinal))
+                    lookupName = lookupName[..^"_GEN_VARIABLE".Length];
+
+                var templateData = GetBlueprintTemplateData(item.BlueprintPath, lookupName);
+                if (templateData == null) continue;
+
+                if (comp.Mesh == null && templateData.MeshIndex != null && !templateData.MeshIndex.IsNull)
+                {
+                    comp.Mesh      = ResolveMeshPath(templateData.MeshIndex);
+                    comp.MeshIndex = templateData.MeshIndex;
+                }
+
+                // Only apply template transforms when the property is not explicitly stored in the umap.
+                var compProps = comp.Export.Properties;
+                if (!compProps.Any(p => p.Name.Text == "RelativeLocation"))
+                    comp.RelLoc   = templateData.RelLoc;
+                if (!compProps.Any(p => p.Name.Text == "RelativeScale3D"))
+                    comp.RelScale = templateData.RelScale;
+                if (!compProps.Any(p => p.Name.Text == "RelativeRotation"))
+                    comp.RelRot   = templateData.RelRot;
+            }
+
+            var exp = item.Export;
+            foreach (var prop in exp.Properties)
+            {
+                if (prop.Name.Text == "BlueprintCreatedComponents") continue;
+                if (prop.Tag == null) continue;
+                FPackageIndex? ci = null;
+                try { ci = prop.Tag.GetValue(typeof(FPackageIndex)) as FPackageIndex; }
+                catch { /* not an object ref */ }
+                if (ci == null || ci.IsNull) continue;
+
+                var comp = ResolveToItem(ci);
+                if (comp == null || comp.CreatedBy != item) continue;
+
+                var templateData = GetBlueprintTemplateData(item.BlueprintPath, prop.Name.Text);
+                if (templateData == null) continue;
+
+                if (comp.Mesh == null && templateData.MeshIndex != null && !templateData.MeshIndex.IsNull)
+                {
+                    comp.Mesh      = ResolveMeshPath(templateData.MeshIndex);
+                    comp.MeshIndex = templateData.MeshIndex;
+                }
+
+                var compProps = comp.Export.Properties;
+                if (!compProps.Any(p => p.Name.Text == "RelativeLocation"))
+                    comp.RelLoc   = templateData.RelLoc;
+                if (!compProps.Any(p => p.Name.Text == "RelativeScale3D"))
+                    comp.RelScale = templateData.RelScale;
+                if (!compProps.Any(p => p.Name.Text == "RelativeRotation"))
+                    comp.RelRot   = templateData.RelRot;
+            }
+        }
+
+        private void Globalize(MapItem item)
+        {
+            if (item.GlobLoc != null) return;
+            if (item.Parent != null) Globalize(item.Parent);
+
+            double[]   pLoc   = item.Parent?.GlobLoc   ?? [0, 0, 0];
+            double[]   pScale = item.Parent?.GlobScale  ?? [1, 1, 1];
+            double[,]  pRot   = item.Parent?.GlobRot    ?? TransformMath.Identity3x3;
+
+            var localRot  = TransformMath.RotationMatrix(item.RelRot[0], item.RelRot[1], item.RelRot[2]);
+            item.GlobRot  = TransformMath.MatMul(pRot, localRot);
+            item.GlobScale = [pScale[0]*item.RelScale[0], pScale[1]*item.RelScale[1], pScale[2]*item.RelScale[2]];
+
+            var sr  = new double[] { item.RelLoc[0]*pScale[0], item.RelLoc[1]*pScale[1], item.RelLoc[2]*pScale[2] };
+            var rt  = TransformMath.MatVecMul(pRot, sr);
+            item.GlobLoc = [pLoc[0]+rt[0], pLoc[1]+rt[1], pLoc[2]+rt[2]];
+
+            foreach (var ri in item.RelInstances)
+            {
+                double ix=ri[0], iy=ri[1], iz=ri[2], isx=ri[3], isy=ri[4], isz=ri[5];
+                double qx=ri[6], qy=ri[7], qz=ri[8], qw=ri[9];
+
+                var iRot = TransformMath.QuaternionToMatrix(qx,qy,qz,qw);
+                var wRot = TransformMath.MatMul(item.GlobRot, iRot);
+
+                var sr2  = new double[] { ix*item.GlobScale[0], iy*item.GlobScale[1], iz*item.GlobScale[2] };
+                var rv   = TransformMath.MatVecMul(item.GlobRot, sr2);
+                var wPos = new double[] { item.GlobLoc[0]+rv[0], item.GlobLoc[1]+rv[1], item.GlobLoc[2]+rv[2] };
+                var wScl = new double[]
+                {
+                    Math.Round(isx*item.GlobScale[0], 2),
+                    Math.Round(isy*item.GlobScale[1], 2),
+                    Math.Round(isz*item.GlobScale[2], 2),
+                };
+                item.GlobInstances.Add(TransformMath.MakeEntry(wPos, wScl, wRot));
+            }
+        }
+
+        private void SerializeItem(
+            MapItem item,
+            Dictionary<string, List<double[]>> symbols,
+            Dictionary<string, List<double[]>> groups,
+            Dictionary<string, List<JObject>>  blueprints)
+        {
+            if (item.CreatedBy != null) return;
+            if (Constants.SkipTypes.Contains(item.ExportType)) return;
+            if (item.GlobLoc == null) return;
+
+            if (item.BlueprintPath != null &&
+                Constants.Patches.TryGetValue(item.BlueprintPath, out var replacePath))
+            {
+                var meshDict = BuildPatchMeshDict(replacePath, item);
+                if (meshDict != null)
+                {
+                    var patchMeshProps = meshDict.Properties().Where(p => p.Name != "_self").ToList();
+                    int patchTotal = patchMeshProps.Sum(p => ((JArray)p.Value).Count);
+                    if (patchTotal == 1)
+                    {
+                        var patchSingleName  = patchMeshProps[0].Name;
+                        var patchSingleEntry = ((JArray)patchMeshProps[0].Value)[0].ToObject<double[]>()!;
+                        if (!symbols.ContainsKey(patchSingleName)) symbols[patchSingleName] = [];
+                        symbols[patchSingleName].Add(patchSingleEntry);
+                    }
+                    else
+                    {
+                        string bpn = Constants.NormaliseBPName(replacePath.Split('/').Last() + "_C");
+                        if (!blueprints.ContainsKey(bpn)) blueprints[bpn] = [];
+                        blueprints[bpn].Add(meshDict);
+                    }
+                }
+                return;
+            }
+
+            if (item.Created.Count > 0)
+            {
+                var selfEntry = TransformMath.MakeEntry(item.GlobLoc!, item.GlobScale!, item.GlobRot!);
+                var meshDict  = new JObject { ["_self"] = ToJArray(selfEntry) };
+                bool hasMesh  = false;
+
+                foreach (var child in item.Created)
+                {
+                    if (child.Mesh == null || child.GlobLoc == null) continue;
+                    var mn = Unpath(child.Mesh);
+                    if (mn == null || Constants.IsHardbanned(mn)) continue;
+                    mn = Constants.NormaliseMeshName(mn);
+                    ExportMesh(child.MeshIndex);
+
+                    var entry = TransformMath.MakeEntry(child.GlobLoc!, child.GlobScale!, child.GlobRot!);
+                    if (!meshDict.ContainsKey(mn)) meshDict[mn] = new JArray();
+                    ((JArray)meshDict[mn]!).Add(ToJArray(entry));
+                    hasMesh = true;
+                }
+
+                if (!hasMesh) return;
+
+                var meshProps = meshDict.Properties().Where(p => p.Name != "_self").ToList();
+                int totalPlacements = meshProps.Sum(p => ((JArray)p.Value).Count);
+                if (totalPlacements == 1)
+                {
+                    var bpSingleName  = meshProps[0].Name;
+                    var bpSingleEntry = ((JArray)meshProps[0].Value)[0].ToObject<double[]>()!;
+                    if (!symbols.ContainsKey(bpSingleName)) symbols[bpSingleName] = [];
+                    symbols[bpSingleName].Add(bpSingleEntry);
+                    return;
+                }
+
+                string bpn = Constants.NormaliseBPName(item.ExportType);
+                if (!blueprints.ContainsKey(bpn)) blueprints[bpn] = [];
+                blueprints[bpn].Add(meshDict);
+                return;
+            }
+
+            if (item.Mesh == null) return;
+            var meshName = Unpath(item.Mesh);
+            if (meshName == null || Constants.IsHardbanned(meshName)) return;
+
+            ExportMesh(item.MeshIndex);
+
+            if (item.GlobInstances.Count > 0)
+            {
+                if (!groups.ContainsKey(meshName)) groups[meshName] = [];
+                groups[meshName].AddRange(item.GlobInstances);
+            }
+            else
+            {
+                var entry = TransformMath.MakeEntry(item.GlobLoc!, item.GlobScale!, item.GlobRot!);
+                if (!symbols.ContainsKey(meshName)) symbols[meshName] = [];
+                symbols[meshName].Add(entry);
+            }
+        }
+
+        private JObject? BuildPatchMeshDict(string replacePath, MapItem actor)
+        {
+            if (!_provider.TryLoadPackage(replacePath, out var bpPkg)) return null;
+
+            UBlueprintGeneratedClass? bgc = null;
+            foreach (var e in bpPkg.GetExports())
+                if (e is UBlueprintGeneratedClass c) { bgc = c; break; }
+            if (bgc == null) return null;
+
+            var scsIdx = bgc.SimpleConstructionScript;
+            UObject? scs = null;
+            if (scsIdx != null && !scsIdx.IsNull)
+                try { scs = scsIdx.Load(); } catch { }
+
+            double[] rPos = actor.GlobLoc!;
+            double[,] rRot = actor.GlobRot!;
+            double[] rScl = actor.GlobScale!;
+
+            var meshEntries = new Dictionary<string, (List<double[]> entries, FPackageIndex? idx)>();
+
+            if (scs != null)
+            {
+                var rootNodes = scs.GetOrDefault<FPackageIndex[]>("RootNodes");
+                if (rootNodes != null)
+                    foreach (var n in rootNodes)
+                        ProcessSCSNode(n, rPos, rRot, rScl, meshEntries);
+            }
+
+            // Also scan CDO for native C++ components not in any SCS node.
+            var cdoIdx = bgc.ClassDefaultObject;
+            if (cdoIdx != null && !cdoIdx.IsNull)
+            {
+                UObject? cdo = null;
+                try { cdo = cdoIdx.Load(); } catch { }
+                if (cdo != null)
+                {
+                    foreach (var cdoProp in cdo.Properties)
+                    {
+                        if (cdoProp.Tag == null) continue;
+                        FPackageIndex? compIdx = null;
+                        try { compIdx = cdoProp.Tag.GetValue(typeof(FPackageIndex)) as FPackageIndex; }
+                        catch { }
+                        if (compIdx == null || compIdx.IsNull) continue;
+
+                        UObject? comp = null;
+                        try { comp = compIdx.Load(); } catch { }
+                        if (comp == null) continue;
+                        if (Constants.SkipTypes.Contains(comp.ExportType)) continue;
+
+                        var mi = comp.GetOrDefault<FPackageIndex>("StaticMesh");
+                        if (mi == null || mi.IsNull)
+                            mi = comp.GetOrDefault<FPackageIndex>("SkeletalMesh");
+                        if (mi == null || mi.IsNull) continue;
+
+                        var mn = Unpath(ResolveMeshPath(mi));
+                        if (mn == null || Constants.IsHardbanned(mn)) continue;
+                        mn = Constants.NormaliseMeshName(mn);
+
+                        var rl  = comp.GetOrDefault<FVector>("RelativeLocation",  FVector.ZeroVector);
+                        var rs  = comp.GetOrDefault<FVector>("RelativeScale3D",   FVector.OneVector);
+                        var rr2 = comp.GetOrDefault<FRotator>("RelativeRotation", FRotator.ZeroRotator);
+
+                        var lRot = TransformMath.RotationMatrix(rr2.Pitch, rr2.Yaw, rr2.Roll);
+                        var wRot = TransformMath.MatMul(rRot, lRot);
+                        var wScl = new double[] { rScl[0]*rs.X, rScl[1]*rs.Y, rScl[2]*rs.Z };
+                        var sr   = new double[] { rl.X*rScl[0], rl.Y*rScl[1], rl.Z*rScl[2] };
+                        var rv   = TransformMath.MatVecMul(rRot, sr);
+                        var wPos = new double[] { rPos[0]+rv[0], rPos[1]+rv[1], rPos[2]+rv[2] };
+
+                        ExportMesh(mi);
+                        if (!meshEntries.ContainsKey(mn))
+                            meshEntries[mn] = ([], mi);
+                        meshEntries[mn].Item1.Add(TransformMath.MakeEntry(wPos, wScl, wRot));
+                    }
+                }
+            }
+
+            if (meshEntries.Count == 0) return null;
+
+            var selfEntry = TransformMath.MakeEntry(rPos, rScl, rRot);
+            var meshDict  = new JObject { ["_self"] = ToJArray(selfEntry) };
+
+            foreach (var (mn, (entries, midx)) in meshEntries)
+            {
+                ExportMesh(midx);
+                var arr = new JArray();
+                foreach (var e in entries) arr.Add(ToJArray(e));
+                meshDict[mn] = arr;
+            }
+
+            return meshDict;
+        }
+
+        private void ProcessSCSNode(
+            FPackageIndex nodeIdx,
+            double[] parentPos, double[,] parentRot, double[] parentScale,
+            Dictionary<string, (List<double[]>, FPackageIndex?)> result)
+        {
+            if (nodeIdx == null || nodeIdx.IsNull) return;
+            UObject? node = null;
+            try { node = nodeIdx.Load(); } catch { return; }
+            if (node == null) return;
+
+            double[] wPos = parentPos; double[,] wRot = parentRot; double[] wScl = parentScale;
+
+            var tplIdx = node.GetOrDefault<FPackageIndex>("ComponentTemplate");
+            if (tplIdx != null && !tplIdx.IsNull)
+            {
+                UObject? tpl = null;
+                try { tpl = tplIdx.Load(); } catch { }
+
+                if (tpl != null && !Constants.SkipTypes.Contains(tpl.ExportType))
+                {
+                    var rl  = tpl.GetOrDefault<FVector>("RelativeLocation",  FVector.ZeroVector);
+                    var rs  = tpl.GetOrDefault<FVector>("RelativeScale3D",   FVector.OneVector);
+                    var rr  = tpl.GetOrDefault<FRotator>("RelativeRotation", FRotator.ZeroRotator);
+
+                    var lRot = TransformMath.RotationMatrix(rr.Pitch, rr.Yaw, rr.Roll);
+                    wRot  = TransformMath.MatMul(parentRot, lRot);
+                    wScl  = [parentScale[0]*rs.X, parentScale[1]*rs.Y, parentScale[2]*rs.Z];
+                    var sr = new double[] { rl.X*parentScale[0], rl.Y*parentScale[1], rl.Z*parentScale[2] };
+                    var rv = TransformMath.MatVecMul(parentRot, sr);
+                    wPos  = [parentPos[0]+rv[0], parentPos[1]+rv[1], parentPos[2]+rv[2]];
+
+                    var mi = tpl.GetOrDefault<FPackageIndex>("StaticMesh");
+                    if (mi == null || mi.IsNull)
+                        mi = tpl.GetOrDefault<FPackageIndex>("SkeletalMesh");
+                    if (mi != null && !mi.IsNull)
+                    {
+                        var mn = Unpath(ResolveMeshPath(mi));
+                        if (mn != null && !Constants.IsHardbanned(mn))
+                        {
+                            mn = Constants.NormaliseMeshName(mn);
+                            ExportMesh(mi);
+                            if (!result.ContainsKey(mn))
+                                result[mn] = ([], mi);
+                            result[mn].Item1.Add(TransformMath.MakeEntry(wPos, wScl, wRot));
+                        }
+                    }
+                }
+            }
+
+            var childNodes = node.GetOrDefault<FPackageIndex[]>("ChildNodes");
+            if (childNodes != null)
+                foreach (var c in childNodes)
+                    ProcessSCSNode(c, wPos, wRot, wScl, result);
+        }
+
+        private TemplateData? GetBlueprintTemplateData(string bpPath, string compName)
+        {
+            if (!_bpTemplateCache.TryGetValue(bpPath, out var cache))
+            {
+                cache = BuildTemplateCache(bpPath);
+                _bpTemplateCache[bpPath] = cache;
+            }
+            return cache.GetValueOrDefault(compName);
+        }
+
+        private Dictionary<string, TemplateData> BuildTemplateCache(string bpPath)
+        {
+            var result = new Dictionary<string, TemplateData>(StringComparer.OrdinalIgnoreCase);
+            if (!_provider.TryLoadPackage(bpPath, out var pkg)) return result;
+
+            UBlueprintGeneratedClass? bpc = null;
+            foreach (var e in pkg.GetExports())
+                if (e is UBlueprintGeneratedClass c) { bpc = c; break; }
+
+            if (bpc != null) ExtractTemplatesFromClass(bpc, result);
+            return result;
+        }
+
+        private void ExtractTemplatesFromClass(UBlueprintGeneratedClass bpc,
+                                               Dictionary<string, TemplateData> result)
+        {
+            if (bpc.Owner == null) return;
+
+            // Recurse into superclass first so that child-class data takes precedence.
+            try
+            {
+                if (bpc.SuperStruct?.Load() is UBlueprintGeneratedClass super)
+                    ExtractTemplatesFromClass(super, result);
+            }
+            catch { }
+
+            // Pass 1: SCS_Node (blueprint-defined components via SimpleConstructionScript)
+            // Pass 2: InheritableComponentHandler (child-blueprint overrides)
+            var ownScsKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var exp in bpc.Owner.GetExports())
+            {
+                if (exp.ExportType == "SCS_Node")
+                {
+                    var ivn = exp.GetOrDefault<FName>("InternalVariableName");
+                    if (ivn.IsNone) continue;
+                    var ti = exp.GetOrDefault<FPackageIndex>("ComponentTemplate");
+                    if (ti == null || ti.IsNull) continue;
+                    UObject? t = null;
+                    try { t = ti.Load(); } catch { }
+                    if (t == null) continue;
+
+                    var meshIdx = t.GetOrDefault<FPackageIndex>("StaticMesh");
+                    if (meshIdx == null || meshIdx.IsNull)
+                        meshIdx = t.GetOrDefault<FPackageIndex>("SkeletalMesh");
+
+                    var tdata = new TemplateData { MeshIndex = meshIdx };
+
+                    var rl = t.GetOrDefault<FVector>("RelativeLocation",  FVector.ZeroVector);
+                    var rs = t.GetOrDefault<FVector>("RelativeScale3D",   FVector.OneVector);
+                    var rr = t.GetOrDefault<FRotator>("RelativeRotation", FRotator.ZeroRotator);
+                    tdata.RelLoc   = [rl.X, rl.Y, rl.Z];
+                    tdata.RelScale = [rs.X, rs.Y, rs.Z];
+                    tdata.RelRot   = [rr.Pitch, rr.Yaw, rr.Roll];
+
+                    result[ivn.Text] = tdata;
+                    ownScsKeys.Add(ivn.Text);
+                }
+
+                if (exp.ExportType == "InheritableComponentHandler")
+                {
+                    var records = exp.GetOrDefault<FStructFallback[]>("Records");
+                    if (records == null) continue;
+                    foreach (var rec in records)
+                    {
+                        var ck  = rec.GetOrDefault<FStructFallback>("ComponentKey");
+                        if (ck == null) continue;
+                        var svn = ck.GetOrDefault<FName>("SCSVariableName");
+                        if (svn.IsNone) continue;
+                        var ti  = rec.GetOrDefault<FPackageIndex>("ComponentTemplate");
+                        if (ti == null || ti.IsNull) continue;
+                        UObject? t = null;
+                        try { t = ti.Load(); } catch { }
+                        if (t == null) continue;
+
+                        if (!result.TryGetValue(svn.Text, out var tdata))
+                        {
+                            tdata = new TemplateData();
+                            result[svn.Text] = tdata;
+                        }
+
+                        var mesh = t.GetOrDefault<FPackageIndex>("StaticMesh");
+                        if (mesh == null || mesh.IsNull)
+                            mesh = t.GetOrDefault<FPackageIndex>("SkeletalMesh");
+                        if (mesh != null && !mesh.IsNull)
+                            tdata.MeshIndex = mesh;
+
+                        // Only overwrite inherited transforms when the ICH template explicitly declares the property.
+                        if (t.Properties.Any(p => p.Name.Text == "RelativeLocation"))
+                        {
+                            var rl = t.GetOrDefault<FVector>("RelativeLocation", FVector.ZeroVector);
+                            tdata.RelLoc = [rl.X, rl.Y, rl.Z];
+                        }
+                        if (t.Properties.Any(p => p.Name.Text == "RelativeScale3D"))
+                        {
+                            var rs = t.GetOrDefault<FVector>("RelativeScale3D", FVector.OneVector);
+                            tdata.RelScale = [rs.X, rs.Y, rs.Z];
+                        }
+                        if (t.Properties.Any(p => p.Name.Text == "RelativeRotation"))
+                        {
+                            var rr = t.GetOrDefault<FRotator>("RelativeRotation", FRotator.ZeroRotator);
+                            tdata.RelRot = [rr.Pitch, rr.Yaw, rr.Roll];
+                        }
+                    }
+                }
+            }
+
+            // Pass 3: CDO – native C++ components not in the SCS. SCS-defined entries take precedence.
+            try
+            {
+                if (bpc.ClassDefaultObject != null && !bpc.ClassDefaultObject.IsNull)
+                {
+                    var cdo = bpc.ClassDefaultObject.Load();
+                    if (cdo != null)
+                    {
+                        foreach (var prop in cdo.Properties)
+                        {
+                            // Skip only if the current class's own SCS already defines this component.
+                            if (ownScsKeys.Contains(prop.Name.Text)) continue;
+                            if (prop.Tag == null) continue;
+
+                            FPackageIndex? compIdx = null;
+                            try { compIdx = prop.Tag.GetValue(typeof(FPackageIndex)) as FPackageIndex; }
+                            catch { }
+                            if (compIdx == null || compIdx.IsNull) continue;
+
+                            UObject? comp = null;
+                            try { comp = compIdx.Load(); } catch { }
+                            if (comp == null) continue;
+                            if (Constants.SkipTypes.Contains(comp.ExportType)) continue;
+
+                            var cdoMeshIdx = comp.GetOrDefault<FPackageIndex>("StaticMesh");
+                            if (cdoMeshIdx == null || cdoMeshIdx.IsNull)
+                                cdoMeshIdx = comp.GetOrDefault<FPackageIndex>("SkeletalMesh");
+
+                            var tdata = new TemplateData { MeshIndex = cdoMeshIdx };
+                            var rl = comp.GetOrDefault<FVector>("RelativeLocation",  FVector.ZeroVector);
+                            var rs = comp.GetOrDefault<FVector>("RelativeScale3D",   FVector.OneVector);
+                            var rr = comp.GetOrDefault<FRotator>("RelativeRotation", FRotator.ZeroRotator);
+                            tdata.RelLoc   = [rl.X, rl.Y, rl.Z];
+                            tdata.RelScale = [rs.X, rs.Y, rs.Z];
+                            tdata.RelRot   = [rr.Pitch, rr.Yaw, rr.Roll];
+
+                            result[prop.Name.Text] = tdata;
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void ExportMesh(FPackageIndex? meshIdx)
+        {
+            if (meshIdx == null || meshIdx.IsNull) return;
+            var fullPath = ResolveMeshPath(meshIdx);
+            if (fullPath == null) return;
+            var name = Unpath(fullPath);
+            if (name == null) return;
+
+            var outDir = Path.Combine(_exportFolder, "_meshes");
+
+            // Skeletal meshes use .psk (≤65536 verts) or .pskx (>65536 verts).
+            if (File.Exists(Path.Combine(outDir, name + ".pskx"))) return;
+            if (File.Exists(Path.Combine(outDir, name + ".psk")))  return;
+
+            try
+            {
+                var obj = meshIdx.Load<UObject>();
+                if (obj == null) return;
+
+                var exporterOptions = new ExporterOptions
+                {
+                    MeshFormat   = EMeshFormat.ActorX,
+                    LodFormat    = ELodFormat.FirstLod,
+                    SocketFormat = ESocketFormat.None,
+                };
+
+                if (obj is UStaticMesh sm)
+                {
+                    var exp = new MeshExporter(sm, exporterOptions);
+                    if (exp.MeshLods.Count == 0) return;
+                    Directory.CreateDirectory(outDir);
+                    File.WriteAllBytes(Path.Combine(outDir, name + ".pskx"), exp.MeshLods[0].FileData);
+                    Log.Debug("Exported static mesh → {0}", name);
+                }
+                else if (obj is USkeletalMesh skm)
+                {
+                    Log.Debug("Attempting skeletal mesh export → {0}", name);
+                    var exp = new MeshExporter(skm, exporterOptions);
+                    if (exp.MeshLods.Count == 0)
+                    {
+                        Log.Warning("No LODs found for skeletal mesh '{0}'", name);
+                        return;
+                    }
+                    var lodExt = Path.GetExtension(exp.MeshLods[0].FileName);
+                    if (string.IsNullOrEmpty(lodExt)) lodExt = ".psk";
+                    Directory.CreateDirectory(outDir);
+                    File.WriteAllBytes(Path.Combine(outDir, name + lodExt), exp.MeshLods[0].FileData);
+                    Log.Debug("Exported skeletal mesh → {0} ({1})", name, lodExt.TrimStart('.'));
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Warning("Cannot export '{0}': {1}", name, ex.Message);
+            }
+        }
+
+        private MapItem? ResolveToItem(FPackageIndex? fpi)
+        {
+            if (fpi == null || fpi.IsNull || !fpi.IsExport) return null;
+            try
+            {
+                var obj = fpi.ResolvedObject?.Object?.Value;
+                return obj != null && _objToItem.TryGetValue(obj, out var item) ? item : null;
+            }
+            catch { return null; }
+        }
+
+        private static string? ResolveMeshPath(FPackageIndex? fpi)
+        {
+            if (fpi == null || fpi.IsNull) return null;
+            var ro = fpi.ResolvedObject;
+            if (ro == null) return null;
+            var pkg  = ro.Package?.Name;
+            if (pkg == null) return null;
+            var obj  = ro.Name.Text;
+            var last = pkg.Split('/').LastOrDefault() ?? string.Empty;
+            return string.Equals(last, obj, StringComparison.OrdinalIgnoreCase) ? pkg : pkg + "." + obj;
+        }
+
+        // "War/Content/Meshes/Foo/Bar.Bar" → "Meshes__Foo__Bar"
+        internal static string? Unpath(string? s)
+        {
+            if (s == null) return null;
+            const string prefix = "War/Content/";
+            if (s.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                s = s[prefix.Length..];
+            s = s.Replace("/", "__").Replace("\\", "__");
+            int dot = s.IndexOf('.');
+            if (dot >= 0) s = s[..dot];
+            return s;
+        }
+
+        // Traverse an imported class's outer chain to rebuild its package path.
+        private static string? GetBlueprintPath(ResolvedObject? classResolved)
+        {
+            if (classResolved == null) return null;
+            try
+            {
+                var outer = classResolved.Outer;
+                if (outer == null) return null;
+
+                var parts = new List<string>();
+                var cur   = outer;
+                while (cur != null)
+                {
+                    var name = cur.Name.Text;
+                    if (string.IsNullOrEmpty(name) || name == "None") break;
+                    parts.Insert(0, name);
+                    cur = cur.Outer;
+                }
+
+                return parts.Count > 0 ? string.Join("/", parts) : null;
+            }
+            catch { return null; }
+        }
+
+        private static JArray ToJArray(double[] entry)
+        {
+            var a = new JArray();
+            foreach (var v in entry) a.Add(new JValue(v));
+            return a;
+        }
+
+        private static JObject ToJObject(Dictionary<string, List<double[]>> dict)
+        {
+            var obj = new JObject();
+            foreach (var (k, vs) in dict)
+            {
+                var arr = new JArray();
+                foreach (var e in vs) arr.Add(ToJArray(e));
+                obj[k] = arr;
+            }
+            return obj;
+        }
+
+        private static JObject BlueprintsToJObject(Dictionary<string, List<JObject>> dict)
+        {
+            var obj = new JObject();
+            foreach (var (k, vs) in dict)
+            {
+                var arr = new JArray();
+                foreach (var e in vs) arr.Add(e);
+                obj[k] = arr;
+            }
+            return obj;
+        }
+    }
+}
