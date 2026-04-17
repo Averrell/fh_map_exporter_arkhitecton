@@ -434,10 +434,10 @@
     "Meshes__Environment__Water__RiverMooringHex",
     "Meshes__Environment__Water__RiverRedRiver",
     "Meshes__Environment__Water__UWWRiver2",
-    "Meshes__Environment__Water__WaterfallSquare",
     "Meshes__Environment__Water__WaterHexPlane"
   ],
   "unsorted": [
+    "Meshes__Environment__Water__WaterfallSquare",
     "Blueprints__Structures__Banners__BannerSandBags",
     "Materials__Environment__Props__StatueLittleGirlKneeling",
     "Materials__Structures__AmmoRoomRack",
@@ -1550,7 +1550,6 @@
     "Meshes__Structures__Airfield__SmallHangarUpper",
     "Meshes__Structures__BuildableSign01",
     "Meshes__Structures__ConstructionYard",
-    "Meshes__Structures__ConstructionYardCritical",
     "Meshes__Structures__CraftableSandbag04",
     "Meshes__Structures__DieselPowerPlant",
     "Meshes__Structures__EmplacementMortar",
@@ -1566,7 +1565,6 @@
     "Meshes__Structures__Factory",
     "Meshes__Structures__FirePitFlame",
     "Meshes__Structures__FlagAHanging",
-    "Meshes__Structures__FortTrenches__AIBunkers__husks__FortT3WallBreach",
     "Meshes__Structures__FortTrenches__bunkerLight",
     "Meshes__Structures__FortTrenches__bunkerLightBase",
     "Meshes__Structures__FortTrenches__FortT3Corner01",

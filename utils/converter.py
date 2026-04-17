@@ -389,6 +389,7 @@ def create_terrain(
     heightmap_path: str,
     collection: bpy.types.Collection,
     stride: int = 1,
+    min_height: float = -100.0,
 ) -> bpy.types.Object:
     """Build a grid mesh from a 16-bit PNG heightmap and add it to *collection*."""
     print(f"  Loading heightmap: {heightmap_path}")
@@ -404,10 +405,18 @@ def create_terrain(
     hm[~valid] = 32768.0
     hm = (hm - 32768.0) / 100.0
 
+    valid = valid & (hm >= min_height)
+
     px_coords = np.arange(0, w, stride, dtype=np.float32)[:cols]
     py_coords = np.arange(0, h, stride, dtype=np.float32)[:rows]
     VX, VY = np.meshgrid(px_coords - cx, -(py_coords - cy))
     verts_np = np.stack([VX.ravel(), VY.ravel(), hm.ravel()], axis=1)
+
+    valid_flat = valid.ravel()
+    old_to_new = np.full(rows * cols, -1, dtype=np.int32)
+    old_to_new[valid_flat] = np.arange(valid_flat.sum(), dtype=np.int32)
+
+    verts_np = verts_np[valid_flat]
 
     gy_idx, gx_idx = np.arange(rows - 1), np.arange(cols - 1)
     GY, GX = np.meshgrid(gy_idx, gx_idx, indexing="ij")
@@ -422,10 +431,10 @@ def create_terrain(
     GY, GX = GY[keep], GX[keep]
 
     faces_np = np.empty((keep.sum(), 4), dtype=np.int32)
-    faces_np[:, 0] = GY * cols + GX
-    faces_np[:, 1] = GY * cols + GX + 1
-    faces_np[:, 2] = (GY + 1) * cols + GX + 1
-    faces_np[:, 3] = (GY + 1) * cols + GX
+    faces_np[:, 0] = old_to_new[GY * cols + GX]
+    faces_np[:, 1] = old_to_new[GY * cols + GX + 1]
+    faces_np[:, 2] = old_to_new[(GY + 1) * cols + GX + 1]
+    faces_np[:, 3] = old_to_new[(GY + 1) * cols + GX]
 
     mesh = bpy.data.meshes.new("Terrain")
     mesh.from_pydata(

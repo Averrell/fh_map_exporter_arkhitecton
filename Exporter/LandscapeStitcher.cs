@@ -87,6 +87,10 @@ namespace Exporter
 
             Log.Information("Unique layers: {0}", string.Join(", ", allPhysNames));
 
+            double zOffsetCm = Constants.GetHeightOffset(mapName);
+            if (zOffsetCm != 0.0)
+                Log.Information("Applying Z offset of {0} cm to '{1}'.", zOffsetCm, mapName);
+
             using var heightDst = new Image<L16>(HmOutputSize, HmOutputSize);
             var weightDsts = allPhysNames.ToDictionary(
                 n => n,
@@ -137,7 +141,7 @@ namespace Exporter
                         info.SrcH = hImgBase.Height;
 
                         if (hImgBase is Image<L16> hImg)
-                            BlitHeightmap(info, hImg, heightDst);
+                            BlitHeightmap(info, hImg, heightDst, zOffsetCm);
                         else
                             Log.Warning("    Unexpected heightmap pixel format for '{0}'.", info.Name);
 
@@ -282,7 +286,8 @@ namespace Exporter
 
         private const double LandscapeZScale = 1.0 / 128.0;
 
-        private static void BlitHeightmap(LandscapeInfo info, Image<L16> src, Image<L16> dst)
+        private static void BlitHeightmap(LandscapeInfo info, Image<L16> src, Image<L16> dst,
+                                           double zOffsetCm = 0.0)
         {
             int srcW = src.Width, srcH = src.Height;
 
@@ -299,7 +304,8 @@ namespace Exporter
                         ushort raw = row[x].PackedValue;
                         // 0 is the UE4 "no-data" sentinel – preserve it so it never overwrites valid height data.
                         if (raw == 0) { srcPixels[y * srcW + x] = 0; continue; }
-                        double heightCm = (raw - 32768) * LandscapeZScale * info.ScaleZ + info.LocZ;
+                        double heightCm = (raw - 32768) * LandscapeZScale * info.ScaleZ + info.LocZ
+                                          + zOffsetCm;
 
                         if (heightCm < -10_000.0) { srcPixels[y * srcW + x] = 0; continue; }
                         

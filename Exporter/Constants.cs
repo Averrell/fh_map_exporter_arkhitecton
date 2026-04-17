@@ -76,5 +76,49 @@ namespace Exporter
                 if (rx.IsMatch(unpathName)) return true;
             return false;
         }
+
+        /// <summary>
+        /// Per-region Z offset in UE4 units (cm) added to all heightmap pixel heights
+        /// and all JSON Z coordinates when exporting that region.
+        /// Keys are lower-cased map names as they appear in the asset path.
+        /// </summary>
+        public static readonly Dictionary<string, double> HeightOffsets =
+            new(System.StringComparer.OrdinalIgnoreCase)
+        {
+            ["shackledchasmhex"]    = 50,
+            ["clahstrahex"]         = 42,
+            ["drownedvalehex"]      = 40,
+            ["endlessshorehex"]     = 50,
+            ["reaverspasshex"]      = 42,
+            ["sableporthex"]        = 50,
+            ["mooringcountyhex"]    = 30,
+            ["stonecradlehex"]      = 50,
+            ["weatheredexpansehex"] = 50,
+            ["stlicanshelfhex"]     = 42,
+            ["tempestislandhex"]    = 50,
+            ["wrestahex"]           = 50,
+            ["farranaccoasthex"]    = 50,
+            ["gutterhex"]           = 50,
+            ["kingscagehex"]        = 50,
+            ["westgatehex"]         = 50,
+            ["fishermansrowhex"]    = 50,
+            ["palantinebermhex"]    = 50,
+            ["stemalandinghex"]     = 42,
+            ["oarbreakerhex"]       = 70,
+            ["lykosislehex"]        = 50,
+            ["kuurastrandhex"]      = 50,
+            ["paripeakhex"]         = 50,
+            ["thefingershex"]       = 50,
+            ["olaviswakehex"]       = 50,
+            ["onyxhex"]             = 50,
+            ["tyrantfoothillshex"]  = 50,
+            ["pipersenclavehex"]    = 50,
+            ["homeregionc"]         = 450,
+            ["homeregionw"]         = 450,
+        };
+
+        /// <summary>Returns the Z offset (cm) for the given map name, or 0 if not found.</summary>
+        public static double GetHeightOffset(string mapName) =>
+            HeightOffsets.TryGetValue(mapName, out var v) ? v : 0.0;
     }
 }

@@ -141,7 +141,8 @@ Output goes to `export/_blend/`.
 ├── utils/
 │   ├── converter.py            # PSK/PSKX parser, Blender helpers, Map class
 │   ├── region_centers.json     # World-space pixel coordinates of all ~55 map regions
-│   └── mask.png                # Hex-shaped mask applied per region tile during stitching
+│   ├── mask.png                # Hex-shaped mask applied per region tile during stitching
+│   └── catalogue.json          # Partially categorized asset names
 └── CUE4Parse/                  # Git submodule - Unreal Engine asset reader
 ```
 

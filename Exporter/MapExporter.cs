@@ -147,6 +147,21 @@ namespace Exporter
             foreach (var item in allItems)
                 if (item.Export != null) Globalize(item);
 
+            // 4b. Apply per-region Z offset to all globalised positions.
+            double zOffsetCm = Constants.GetHeightOffset(mapName);
+            if (zOffsetCm != 0.0)
+            {
+                Log.Information("Applying Z offset of {0} cm to map '{1}'.", zOffsetCm, mapName);
+                foreach (var item in allItems)
+                {
+                    if (item.GlobLoc != null)
+                        item.GlobLoc[2] += zOffsetCm;
+
+                    foreach (var inst in item.GlobInstances)
+                        inst[2] += zOffsetCm;
+                }
+            }
+
             // 5. Serialize
             Log.Information("Serializing…");
             var symbols    = new Dictionary<string, List<double[]>>();
@@ -785,6 +800,7 @@ namespace Exporter
             if (fullPath == null) return;
             var name = Unpath(fullPath);
             if (name == null) return;
+            name = Constants.NormaliseMeshName(name);
 
             var outDir = Path.Combine(_exportFolder, "_meshes");
 
