@@ -1,8 +1,9 @@
 """Stitch step-4 bakes into world PNGs and assemble final composites.
 
 Writes to ``export/_final/``: ``technical/`` (ao, heightmap_simple, contour),
-``assembly/`` (base_layer, beaches, roads, fly_alert, dive_alert, contours,
-rdz, ranges, bridges_aim), and verbatim ``id/``, ``split_layers/``,
+``assembly/`` (base_layer, beaches, roads, mud_roads, fly_alert, dive_alert,
+contours, rdz, ranges, bridges_aim), every terrain material under
+``landscape_layers/``, and verbatim ``id/``, ``split_layers/``,
 ``svg_layers/``.
 
 Usage:
@@ -37,6 +38,8 @@ from utils.config import (
     LAYER_COLORS,
     LAYERS_DIR,
     MASK_FILE,
+    MUD_ROAD_COLOR,
+    MUD_ROAD_LAYERS,
     RDZ_PATTERN_FILE,
     ROADS_DIR,
     SHADES_BLUR_KSIZE,
@@ -536,6 +539,8 @@ def build_shades(
     height: int,
     width: int,
     shade_alpha: np.ndarray | None,
+    mud_roads_out: Path | None = None,
+    separate_layers_dir: Path | None = None,
 ) -> Tuple[np.ndarray, np.ndarray] | None:
     """Stitch every LAYERS_DIR/<layer>/ folder and composite via
     alpha-betting into an RGB canvas. Returns (shades_bgr, shades_alpha)
@@ -550,6 +555,12 @@ def build_shades(
     claim_mask = (shade_alpha > 0) if shade_alpha is not None else None
     shades = np.zeros((height, width, 3), dtype=np.uint8)
     winner_alpha = np.zeros((height, width), dtype=np.uint8)
+    winner_is_mud_road = (
+        np.zeros((height, width), dtype=np.uint8)
+        if mud_roads_out is not None
+        else None
+    )
+    mud_road_names = {name.casefold() for name in MUD_ROAD_LAYERS}
 
     used_colors: set = {_hex_to_bgr(c) for c in LAYER_COLORS.values()}
     rng = random.Random(0xF0)
@@ -566,10 +577,44 @@ def build_shades(
             canvas = canvas * claim_mask.astype(np.uint8)
         color = _assign_layer_color(layer, LAYER_COLORS, used_colors, rng)
         print(f"  color: BGR{color}")
+
+        if separate_layers_dir is not None:
+            layer_alpha = canvas
+            if shade_alpha is not None:
+                layer_alpha = np.minimum(layer_alpha, shade_alpha)
+            layer_bgra = np.empty((height, width, 4), dtype=np.uint8)
+            layer_bgra[..., 0] = color[0]
+            layer_bgra[..., 1] = color[1]
+            layer_bgra[..., 2] = color[2]
+            layer_bgra[..., 3] = layer_alpha
+            layer_out = separate_layers_dir / f"{layer}.png"
+            _write_rgba(layer_bgra, layer_out)
+            LOG.saved(layer_out)
+            del layer_bgra, layer_alpha
+
         win = canvas > winner_alpha
         if win.any():
             shades[win] = color
             winner_alpha[win] = canvas[win]
+            if winner_is_mud_road is not None:
+                winner_is_mud_road[win] = (
+                    255 if layer.casefold() in mud_road_names else 0
+                )
+
+    if mud_roads_out is not None and winner_is_mud_road is not None:
+        mud_alpha = winner_alpha.copy()
+        mud_alpha[winner_is_mud_road == 0] = 0
+        if shade_alpha is not None:
+            mud_alpha = np.minimum(mud_alpha, shade_alpha)
+        mud_bgr = _hex_to_bgr(MUD_ROAD_COLOR)
+        mud_bgra = np.empty((height, width, 4), dtype=np.uint8)
+        mud_bgra[..., 0] = mud_bgr[0]
+        mud_bgra[..., 1] = mud_bgr[1]
+        mud_bgra[..., 2] = mud_bgr[2]
+        mud_bgra[..., 3] = mud_alpha
+        _write_rgba(mud_bgra, mud_roads_out)
+        LOG.saved(mud_roads_out)
+        del mud_alpha, mud_bgra, winner_is_mud_road
 
     claimed = winner_alpha > 0
     if claimed.any():
@@ -837,7 +882,13 @@ def main() -> int:
     if HM_WATER_DIR.is_dir():      est += 1  # heightmap_simple
     if HM_LANDSCAPE_DIR.is_dir() and HM_WATER_DIR.is_dir():
         est += 1  # dive_alert
-    est += 3  # base_layer, rdz, ranges (may skip)
+    landscape_layer_count = (
+        sum(1 for path in LAYERS_DIR.iterdir() if path.is_dir())
+        if LAYERS_DIR.is_dir()
+        else 0
+    )
+    est += landscape_layer_count
+    est += 4  # mud_roads, base_layer, rdz, ranges (may skip)
     LOG.set_total(est)
 
     world_alpha = _compute_world_alpha(centres, mask, height, width)
@@ -1014,7 +1065,15 @@ def main() -> int:
 
     # shade_alpha = terrain * (not water) ∧ world_alpha (same as ground_u8)
     shade_alpha = ground_u8 if terrain_cov is not None else None
-    shades_pair = build_shades(centres, mask, height, width, shade_alpha)
+    shades_pair = build_shades(
+        centres,
+        mask,
+        height,
+        width,
+        shade_alpha,
+        mud_roads_out=FINAL_DIR / ASSEMBLY_DIR / "mud_roads.png",
+        separate_layers_dir=FINAL_DIR / "landscape_layers",
+    )
 
     # -- assembly/base_layer.png --
     build_base_layer(

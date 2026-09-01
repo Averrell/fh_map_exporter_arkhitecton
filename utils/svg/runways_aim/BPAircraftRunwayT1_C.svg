@@ -1,5 +1,27 @@
-<?xml version="1.0" encoding="utf-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="-300 -300 600 600" overflow="visible">
-  <path d="M-360-10.5h720M-360 10.5h720" stroke="#FF0000" stroke-width="1" />
-  <path d="M-360-10.5h720M-360 10.5h720" stroke="#FF0000" stroke-width="1" />
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 721 310.2">
+  <!-- Generator: Adobe Illustrator 30.6.0, SVG Export Plug-In . SVG Version: 2.1.4 Build 109)  -->
+  <defs>
+    <style>
+      .st0 {
+        fill: none;
+      }
+
+      .st0, .st1 {
+        stroke: red;
+      }
+    </style>
+  </defs>
+  <g id="Calque_1">
+    <path class="st1" d="M.5,144.6h720M.5,165.6h720"/>
+    <path class="st1" d="M.5,144.6h720M.5,165.6h720"/>
+  </g>
+  <g id="Calque_2">
+    <line class="st0" x1="685.7" y1=".4" x2="436" y2="144.6"/>
+    <line class="st0" x1="685.7" y1="309.7" x2="436" y2="165.6"/>
+    <line class="st0" x1="285" y1="165.6" x2="35.3" y2="309.7"/>
+    <line class="st0" x1="285" y1="144.6" x2="35.3" y2=".4"/>
+    <path class="st0" d="M35.3,309.7C13,262.9.5,210.4.5,155.1S13,47.3,35.3.4"/>
+    <path class="st0" d="M685.7.4c22.3,46.8,34.8,99.3,34.8,154.6s-12.5,107.8-34.8,154.7"/>
+  </g>
 </svg>

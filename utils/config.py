@@ -361,6 +361,21 @@ LAYER_COLORS: Dict[str, str] = {
     "TrenchDirt":              "#B7A491",
 }
 
+# Landscape weightmap layers used for pedestrian paths, packed-earth roads,
+# plazas and similar town surfaces. 5_finalize_exports.py exports their winning
+# coverage as a standalone transparent assembly/mud_roads.png layer.
+MUD_ROAD_LAYERS = {
+    "Road",
+    "TownStone",
+    "Highway",
+    "DataLayer__",
+    "E",
+    "G",
+    "MuddyGround",
+    "TrenchDirt",
+}
+MUD_ROAD_COLOR = "#B7A491"
+
 ID_RECOLOR: Dict[str, str] = {
     "water":                   "#DFE8ED",
     "terrain":                 "#9495A1",
