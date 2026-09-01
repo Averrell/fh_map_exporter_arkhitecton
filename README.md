@@ -24,7 +24,9 @@ These stable links always point to the assets attached to the latest GitHub
 release:
 
 - [Download the full assembled map — 20528 × 12704 PNG](https://github.com/Averrell/fh_map_exporter_arkhitecton/releases/latest/download/Foxhole_full_map_20528x12704.png)
+- [Download the blue full assembled map — 20528 × 12704 PNG](https://github.com/Averrell/fh_map_exporter_arkhitecton/releases/latest/download/Foxhole_full_map_blue_20528x12704.png)
 - [Download the world-map background — 7680 × 4320 PNG](https://github.com/Averrell/fh_map_exporter_arkhitecton/releases/latest/download/Foxhole_worldmap_background_7680x4320.png)
+- [Download the blue world-map background — 7680 × 4320 PNG](https://github.com/Averrell/fh_map_exporter_arkhitecton/releases/latest/download/Foxhole_worldmap_background_blue_7680x4320.png)
 
 The release files must keep these exact filenames so the links remain valid.
 
