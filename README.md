@@ -1,12 +1,45 @@
-# Foxhole Map Exporter
+# Foxhole Map Exporter — Arkhitecton Fork
 
-Python pipeline for exporting and processing maps from [Foxhole](https://store.steampowered.com/app/505460/Foxhole/).
+A fork of [Tsekho's Foxhole Map Exporter](https://github.com/Tsekho/fh_map_exporter),
+adapted for cartographic and graphic-design workflows. It extracts Foxhole's
+map data and produces editable, world-sized PNG layers aligned on a
+**20528 × 12704 px** canvas (55 regions).
+
 Updated for U66.
 
-### Credits
+## What This Fork Adds
 
-The amazing idea of thresholded water depth coloring was adopted from
-[Knight of Science's fork](https://github.com/Knight-of-Science/fh_map_exporter).
+- A standalone transparent `mud_roads.png` layer containing pedestrian paths,
+  packed-earth roads, plazas and similar town surfaces.
+- Separate full-resolution exports for every Landscape weightmap material,
+  including Grass, Snow, Sand, Dirt, Road, TownStone, MuddyGround, Rock, Stone
+  and Ice.
+- A redesigned runway-approach SVG symbol and corrected world-map export.
+- Ready-to-use final layers under `export/_final/`.
+- A French quick-start guide: `README_INSTALLATION_FR.txt`.
+
+## Ready-to-use Downloads
+
+These stable links always point to the assets attached to the latest GitHub
+release:
+
+- [Download the full assembled map — 20528 × 12704 PNG](https://github.com/Averrell/fh_map_exporter_arkhitecton/releases/latest/download/Foxhole_full_map_20528x12704.png)
+- [Download the world-map background — 7680 × 4320 PNG](https://github.com/Averrell/fh_map_exporter_arkhitecton/releases/latest/download/Foxhole_worldmap_background_7680x4320.png)
+
+The release files must keep these exact filenames so the links remain valid.
+
+## Credits and AI Disclosure
+
+- Original exporter and pipeline by [Tsekho](https://github.com/Tsekho/fh_map_exporter).
+- The idea of thresholded water-depth colouring was adopted from
+  [Knight of Science's fork](https://github.com/Knight-of-Science/fh_map_exporter).
+- Fork modifications, visual direction and testing by
+  [Averrell / Arkhitecton](https://github.com/Averrell).
+
+ChatGPT was used as a programming assistant to understand the existing code and
+to help implement and debug some modifications under manual supervision and
+testing. AI was **not** used for graphic design or image generation: all visual
+assets, drawings and graphic choices were created manually.
 
 ## Pipeline
 
@@ -38,7 +71,7 @@ pip install numpy opencv-python bpy cairosvg
 Clone with submodules (CUE4Parse is required):
 
 ```bash
-git clone --recurse-submodules https://github.com/Tsekho/fh_map_exporter.git
+git clone --recurse-submodules https://github.com/Averrell/fh_map_exporter_arkhitecton.git
 ```
 
 ## Usage
@@ -172,6 +205,10 @@ Output layout (under `export/_final/`):
 - `technical/contour.png` - black RGBA lines where `hm // 250`
   increments across a 4-neighbor boundary, masked to terrain.
 - `assembly/roads.png`, `assembly/beaches.png` - stitched from step 4.
+- `assembly/mud_roads.png` - transparent coverage of the Landscape materials
+  listed in `MUD_ROAD_LAYERS`; intended for pedestrian paths, packed-earth
+  roads, plazas and similar surfaces. Its colour is controlled by
+  `MUD_ROAD_COLOR` in `utils/config.py`.
 - `assembly/fly_alert.png` - `utils/fly_alert_pattern.png` tiled, alpha
   ramped between `FLY_ALERT_MIN_M` and `FLY_ALERT_MAX_M`, gated by
   `rocks_cov`.
@@ -197,6 +234,8 @@ Output layout (under `export/_final/`):
 - `assembly/bridges_aim.png` - bridge aligning lines, built procedurally in `4_render_spills.py` (per-region tiles in their own `bridges_aim/` folder).
 - `id/<cat>.png`, `split_layers/<layer>.png`, `svg_layers/<layer>.png`
   - verbatim stitches of the per-region bakes.
+- `landscape_layers/<layer>.png` - one transparent, world-sized PNG for every
+  Landscape weightmap material found in `export/_layers/`.
 
 **Important**: This exporter's output is intended for use with the
 [map mod generator](https://github.com/Tsekho/fh_map_mod_generator) that allows to convert composed layers into a standalone map mod via a single function call. For any other use you'll most likely want to break it apart into separate regions - see step 6.
@@ -239,6 +278,7 @@ The fan-out logic lives in `utils/parallel.py`.
 ├── 4_render_spills.py          # Top-down bakes per region
 ├── 5_finalize_exports.py       # Stitches bakes + layers into world PNGs
 ├── 6_breaker.py                # Breaks a world PNG back into per-region tiles
+├── README_INSTALLATION_FR.txt  # French quick-start for this fork's additions
 ├── Exporter/                   # C# exporter source (.NET 10, win-x64)
 │   ├── Program.cs
 │   ├── MapExporter.cs
