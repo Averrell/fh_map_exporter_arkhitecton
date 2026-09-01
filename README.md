@@ -18,6 +18,19 @@ Updated for U66.
 - Ready-to-use final layers under `export/_final/`.
 - A French quick-start guide: `README_INSTALLATION_FR.txt`.
 
+## Companion Blender Add-on
+
+The separate
+[Topo Hachures Blender Generator](https://github.com/Averrell/Hachure_topo_blender_generator)
+can turn an exported heightmap into deterministic cartographic hachures. It
+exports editable SVG or transparent PNG files and provides independent slope
+and directional-shadow layers, elevation-based density control, masks and
+large-resolution rendering.
+
+The add-on is maintained in its own repository because it can be used with any
+suitable heightmap; it is not specific to Foxhole or required to run this
+exporter.
+
 ## Ready-to-use Downloads
 
 These stable links always point to the assets attached to the latest GitHub
